@@ -300,27 +300,39 @@ def extract_image_patch(image, bbox, patch_shape):
     return image
 
 
-def _create_image_encoder(preprocess_fn, factory_fn, image_shape, batch_size=32,
-                         session=None, checkpoint_path=None,
-                         loss_mode="cosine"):
-    image_var = tf.placeholder(tf.uint8, (None, ) + image_shape)
+def _create_image_encoder(preprocess_fn, factory_fn, image_shape, graph,
+                          batch_size=32, session=None, checkpoint_path=None,
+                          loss_mode="cosine"):
+    with graph.as_default():
+        image_var = tf.placeholder(tf.uint8, (None, ) + image_shape)
 
-    preprocessed_image_var = tf.map_fn(
-        lambda x: preprocess_fn(x, is_training=False),
-        tf.cast(image_var, tf.float32))
+        preprocessed_image_var = tf.map_fn(
+            lambda x: preprocess_fn(x, is_training=False),
+            tf.cast(image_var, tf.float32))
 
-    l2_normalize = loss_mode == "cosine"
-    feature_var, _ = factory_fn(
-        preprocessed_image_var, l2_normalize=l2_normalize, reuse=None)
-    feature_dim = feature_var.get_shape().as_list()[-1]
+        l2_normalize = loss_mode == "cosine"
+        feature_var, _ = factory_fn(
+            preprocessed_image_var, l2_normalize=l2_normalize, reuse=None)
+        feature_dim = feature_var.get_shape().as_list()[-1]
 
-    if session is None:
-        session = tf.Session()
-    if checkpoint_path is not None:
-        slim.get_or_create_global_step()
-        init_assign_op, init_feed_dict = slim.assign_from_checkpoint(
-            checkpoint_path, slim.get_variables_to_restore())
-        session.run(init_assign_op, feed_dict=init_feed_dict)
+        if session is None:
+            # gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.2)
+            gpu_options = tf.GPUOptions(allow_growth=True)
+            session = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+        if checkpoint_path is not None:
+            # DEBUG
+            # slim.get_or_create_global_step()
+            # TODO: observed too many variables from get_varibales. suspect its some interactive session going on.
+            with session:
+                # slim.get_or_create_global_step()
+                tf.train.get_or_create_global_step()
+                get_variables_torestore = slim.get_variables_to_restore()
+            # for var in get_variables_torestore:
+            #     print("DEBUG: ", var)
+                # DEBUG
+            init_assign_op, init_feed_dict = slim.assign_from_checkpoint(
+                checkpoint_path, get_variables_torestore)
+            session.run(init_assign_op, feed_dict=init_feed_dict)
 
     def encoder(data_x):
         out = np.zeros((len(data_x), feature_dim), np.float32)
@@ -334,12 +346,13 @@ def _create_image_encoder(preprocess_fn, factory_fn, image_shape, batch_size=32,
 
 def create_image_encoder(model_filename, batch_size=32, loss_mode="cosine",
                          session=None):
+    graph = tf.Graph()
     image_shape = 128, 64, 3
     factory_fn = _network_factory(
         num_classes=1501, is_training=False, weight_decay=1e-8)
 
     return _create_image_encoder(
-        _preprocess, factory_fn, image_shape, batch_size, session,
+        _preprocess, factory_fn, image_shape, graph, batch_size, session,
         model_filename, loss_mode)
 
 

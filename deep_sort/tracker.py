@@ -6,6 +6,17 @@ from . import linear_assignment
 from . import iou_matching
 from .track import Track
 
+class ObjectTrack(Track):
+    def __init__(self, mean, covariance, track_id, n_init, max_age,
+                 feature=None, mess=None, name = None):
+        super().__init__(mean, covariance, track_id, n_init, max_age, feature)
+        self.name = name
+        self.mess = mess
+        self.pts = []
+
+    def update(self, kf, detection):
+            super().update(kf, detection)
+            self.pts.append(self.mean[:2])
 
 class Tracker:
     """
@@ -55,7 +66,7 @@ class Tracker:
         for track in self.tracks:
             track.predict(self.kf)
 
-    def update(self, detections):
+    def update(self, detections, messes):
         """Perform measurement update and track management.
 
         Parameters
@@ -75,7 +86,7 @@ class Tracker:
         for track_idx in unmatched_tracks:
             self.tracks[track_idx].mark_missed()
         for detection_idx in unmatched_detections:
-            self._initiate_track(detections[detection_idx])
+            self._initiate_track(detections[detection_idx], messes[detection_idx])
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
         # Update distance metric.
@@ -130,9 +141,9 @@ class Tracker:
         unmatched_tracks = list(set(unmatched_tracks_a + unmatched_tracks_b))
         return matches, unmatched_tracks, unmatched_detections
 
-    def _initiate_track(self, detection):
+    def _initiate_track(self, detection, mess):
         mean, covariance = self.kf.initiate(detection.to_xyah())
-        self.tracks.append(Track(
+        self.tracks.append(ObjectTrack( #change Track to ObjectTract by Willi
             mean, covariance, self._next_id, self.n_init, self.max_age,
-            detection.feature))
+            detection.feature, mess))
         self._next_id += 1

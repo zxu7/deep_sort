@@ -9,83 +9,83 @@ from __future__ import print_function
 from tensorflow.python.framework import graph_util
 import tensorflow as tf
 import argparse
-import os
 import sys
-from six.moves import xrange
-tf.graph_util.convert_variables_to_constants()
+from generate_detections import _network_factory
+from tensorflow.contrib import slim
 
-def main(args):
-    with tf.Graph().as_default():
-        with tf.Session() as sess:
-            # Load the model metagraph and checkpoint
-            print('Model directory: %s' % args.model_dir)
-            meta_file = 'mars-small128.ckpt-68577.meta'
-            ckpt_file = 'mars-small128.ckpt-68577'
 
-            print('Metagraph file: %s' % meta_file)
-            print('Checkpoint file: %s' % ckpt_file)
+def preprocess_fn(image, is_training=False, enable_more_augmentation=True):
+    image = image[:, :, ::-1]  # BGR to RGB
+    if is_training:
+        image = tf.image.random_flip_left_right(image)
+        if enable_more_augmentation:
+            image = tf.image.random_brightness(image, max_delta=50)
+            image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+            image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
+    return image
 
-            model_dir_exp = os.path.expanduser(args.model_dir)
-            saver = tf.train.import_meta_graph(os.path.join(model_dir_exp, meta_file), clear_devices=True)
-            tf.get_default_session().run(tf.global_variables_initializer())
-            tf.get_default_session().run(tf.local_variables_initializer())
-            saver.restore(tf.get_default_session(), os.path.join(model_dir_exp, ckpt_file))
 
-            # Retrieve the protobuf graph definition and fix the batch norm nodes
-            input_graph_def = sess.graph.as_graph_def()
+def main(checkpoint_path, pb_path):
+    """
 
-            # Freeze the graph def
-            output_graph_def = freeze_graph_def(sess, input_graph_def, ['ball/beta'])
+    :param checkpoint_path:
+    :param pb_path:
+    :return:
+    """
+    image_shape = 128, 64, 3
+    loss_mode = 'cosine'
+    graph = tf.Graph()
 
-        # Serialize and dump the output graph to the filesystem
-        with tf.gfile.GFile(args.output_file, 'wb') as f:
+    factory_fn = _network_factory(num_classes=1501, is_training=False, weight_decay=1e-8)
+
+    with graph.as_default() as G1:
+        image_var = tf.placeholder(tf.uint8, (None,) + image_shape)
+
+        preprocessed_image_var = tf.map_fn(
+            lambda x: preprocess_fn(x, is_training=False),
+            tf.cast(image_var, tf.float32))
+
+        l2_normalize = loss_mode == "cosine"
+        feature_var, _ = factory_fn(
+            preprocessed_image_var, l2_normalize=l2_normalize, reuse=None)
+        feature_dim = feature_var.get_shape().as_list()[-1]
+
+        session = tf.Session()
+        with session:
+            # slim.get_or_create_global_step()
+            tf.train.get_or_create_global_step()
+            get_variables_torestore = slim.get_variables_to_restore()
+        for var in get_variables_torestore:
+            print("DEBUG: ", var)
+
+        # restore graph
+        init_assign_op, init_feed_dict = slim.assign_from_checkpoint(
+            checkpoint_path, get_variables_torestore)
+        session.run(init_assign_op, feed_dict=init_feed_dict)
+
+        # write to pb
+        g1_graph_def = G1.as_graph_def()
+        output_node_names = "truediv"
+        output_graph_def = tf.graph_util.convert_variables_to_constants(
+            session,  # The session
+            g1_graph_def,  # input_graph_def is useful for retrieving the nodes
+            output_node_names.split(",")
+        )
+        # save the pb
+        with tf.gfile.GFile(pb_path, "wb") as f:
             f.write(output_graph_def.SerializeToString())
-        print("%d ops in the final graph: %s" % (len(output_graph_def.node), args.output_file))
-
-
-def freeze_graph_def(sess, input_graph_def, output_node_names):
-    for node in input_graph_def.node:
-        print(node.name)
-    # for node in input_graph_def.node:
-    #     if node.op == 'RefSwitch':
-    #         node.op = 'Switch'
-    #         for index in xrange(len(node.input)):
-    #             if 'moving_' in node.input[index]:
-    #                 node.input[index] = node.input[index] + '/read'
-    #     elif node.op == 'AssignSub':
-    #         node.op = 'Sub'
-    #         if 'use_locking' in node.attr: del node.attr['use_locking']
-    #     elif node.op == 'AssignAdd':
-    #         node.op = 'Add'
-    #         if 'use_locking' in node.attr: del node.attr['use_locking']
-    #
-    # # Get the list of important nodes
-    # whitelist_names = []
-    # for node in input_graph_def.node:
-    #     if (node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or
-    #             node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith(
-    #         'Logits')):
-    #         whitelist_names.append(node.name)
-    #
-    # # Replace all the variables in the graph with constants of the same values
-    # output_graph_def = graph_util.convert_variables_to_constants(
-    #     sess, input_graph_def, output_node_names.split(","),
-    #     variable_names_whitelist=whitelist_names)
-    output_graph_def = graph_util.convert_variables_to_constants(
-        sess, input_graph_def, output_node_names
-    )
-    return output_graph_def
 
 
 def parse_arguments(argv):
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model_dir', type=str,
-                        help='Directory containing the metagraph (.meta) file and the checkpoint (ckpt) file containing model parameters')
-    parser.add_argument('--output_file', type=str,
-                        help='Filename for the exported graphdef protobuf (.pb)')
+    parser.add_argument('--checkpoint_path', type=str,
+                        help='path/to/checkpoint')
+    parser.add_argument('--pb_path', type=str,
+                        help='output pb path. path/to/pb')
     return parser.parse_args(argv)
 
 
 if __name__ == '__main__':
-    main(parse_arguments(sys.argv[1:]))
+    args = parse_arguments()
+    main(args.checkpoint_path)

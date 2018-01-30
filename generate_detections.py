@@ -301,38 +301,70 @@ def extract_image_patch(image, bbox, patch_shape):
 
 
 def _create_image_encoder(preprocess_fn, factory_fn, image_shape, graph,
-                          batch_size=32, session=None, checkpoint_path=None,
+                          batch_size=32, session=None, model_path=None,
                           loss_mode="cosine"):
-    with graph.as_default():
-        image_var = tf.placeholder(tf.uint8, (None, ) + image_shape)
+    from_pb = False
+    if model_path.endswith('pb'):
+        from_pb = True
+    if from_pb:
+        #TODO: change to nonfixed frozen_graph_path
+        frozen_graph = '/home/harry/notebooks/deep_sort-model.pb'
+        with tf.gfile.GFile(frozen_graph, "rb") as f:
+            restored_graph_def = tf.GraphDef()
+            restored_graph_def.ParseFromString(f.read())
 
-        preprocessed_image_var = tf.map_fn(
-            lambda x: preprocess_fn(x, is_training=False),
-            tf.cast(image_var, tf.float32))
-
-        l2_normalize = loss_mode == "cosine"
-        feature_var, _ = factory_fn(
-            preprocessed_image_var, l2_normalize=l2_normalize, reuse=None)
-        feature_dim = feature_var.get_shape().as_list()[-1]
-
-        if session is None:
-            # gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.2)
+        with tf.Graph().as_default() as graph:
+            tf.import_graph_def(
+                restored_graph_def,
+                input_map=None,
+                return_elements=None,
+                name=""
+            )
+            ## NOW the complete graph with values has been restored
+            feature_var = graph.get_tensor_by_name("truediv:0")
+            feature_dim = feature_var.get_shape().as_list()[-1]
+            ## Let's feed the images to the input placeholders
+            image_var = graph.get_tensor_by_name("Placeholder:0")
             gpu_options = tf.GPUOptions(allow_growth=True)
-            session = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
-        if checkpoint_path is not None:
-            # DEBUG
-            # slim.get_or_create_global_step()
-            # TODO: observed too many variables from get_varibales. suspect its some interactive session going on.
-            with session:
-                # slim.get_or_create_global_step()
-                tf.train.get_or_create_global_step()
-                get_variables_torestore = slim.get_variables_to_restore()
-            # for var in get_variables_torestore:
-            #     print("DEBUG: ", var)
+            session = tf.Session(graph=graph,
+                                 config=tf.ConfigProto(gpu_options=gpu_options))
+    else:
+        with graph.as_default() as G1:
+            image_var = tf.placeholder(tf.uint8, (None, ) + image_shape)
+
+            preprocessed_image_var = tf.map_fn(
+                lambda x: preprocess_fn(x, is_training=False),
+                tf.cast(image_var, tf.float32))
+
+            l2_normalize = loss_mode == "cosine"
+            feature_var, _ = factory_fn(
+                preprocessed_image_var, l2_normalize=l2_normalize, reuse=None)
+            feature_dim = feature_var.get_shape().as_list()[-1]
+
+            if session is None:
+                # gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.2)
+                gpu_options = tf.GPUOptions(allow_growth=True)
+                session = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
+            if model_path is not None:
                 # DEBUG
-            init_assign_op, init_feed_dict = slim.assign_from_checkpoint(
-                checkpoint_path, get_variables_torestore)
-            session.run(init_assign_op, feed_dict=init_feed_dict)
+                # slim.get_or_create_global_step()
+                # TODO: observed too many variables from get_varibales. suspect its some interactive session going on.
+                with session:
+                    # slim.get_or_create_global_step()
+                    tf.train.get_or_create_global_step()
+                    get_variables_torestore = slim.get_variables_to_restore()
+                for var in get_variables_torestore:
+                    print("DEBUG: ", var)
+                    # DEBUG
+
+                # from tensorflow.python.platform import gfile
+                # graph_def = graph.as_graph_def()
+                # with gfile.GFile(model_path, 'wb') as f:
+                #     f.write(graph_def.SerializeToString())
+
+                init_assign_op, init_feed_dict = slim.assign_from_checkpoint(
+                    model_path, get_variables_torestore)
+                session.run(init_assign_op, feed_dict=init_feed_dict)
 
     def encoder(data_x):
         out = np.zeros((len(data_x), feature_dim), np.float32)

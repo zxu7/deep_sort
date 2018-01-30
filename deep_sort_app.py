@@ -163,7 +163,7 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
     tracker = Tracker(metric)
     results = []
 
-    def frame_callback(vis, frame_idx):
+    def frame_callback(vis, frame_idx, to_display=display):
         print("Processing frame %05d" % frame_idx)
 
         # Load image and generate detections.
@@ -180,10 +180,11 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
 
         # Update tracker.
         tracker.predict()
-        tracker.update(detections)
+        messes = ['person'] * 1000
+        tracker.update(detections, messes)
 
         # Update visualization.
-        if display:
+        if to_display:
             image = cv2.imread(
                 seq_info["image_filenames"][frame_idx], cv2.IMREAD_COLOR)
             vis.set_image(image.copy())
@@ -201,8 +202,10 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
     # Run tracker.
     if display:
         visualizer = visualization.Visualization(seq_info, update_ms=5)
+        print("DEBUG: display")
     else:
         visualizer = visualization.NoVisualization(seq_info)
+        print("DBBUG: no display")
     visualizer.run(frame_callback)
 
     # Store results.
@@ -245,12 +248,14 @@ def parse_args():
         "gallery. If None, no budget is enforced.", type=int, default=None)
     parser.add_argument(
         "--display", help="Show intermediate tracking results",
-        default=True, type=bool)
+        default=False, type=bool)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    # args.display = False
+    print("DEBUG: args.display: ", args.display)
     run(
         args.sequence_dir, args.detection_file, args.output_file,
         args.min_confidence, args.nms_max_overlap, args.min_detection_height,
